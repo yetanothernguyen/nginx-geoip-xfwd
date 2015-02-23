@@ -24,6 +24,7 @@ typedef struct {
     GeoIP        *city;
     ngx_array_t  *proxies;    /* array of ngx_cidr_t */
     ngx_flag_t    proxy_recursive;
+    ngx_flag_t    force_x_forwarded_for;
 #if (NGX_HAVE_GEOIP_V6)
     unsigned      country_v6:1;
     unsigned      org_v6:1;
@@ -129,6 +130,13 @@ static ngx_command_t  ngx_http_geoip_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_geoip_conf_t, proxy_recursive),
+      NULL },
+
+    { ngx_string("geoip_force_x_forwarded_for"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_geoip_conf_t, force_x_forwarded_for),
       NULL },
 
       ngx_null_command
@@ -242,6 +250,11 @@ ngx_http_geoip_addr(ngx_http_request_t *r, ngx_http_geoip_conf_t *gcf)
     ngx_addr_t           addr;
     ngx_array_t         *xfwd;
     struct sockaddr_in  *sin;
+    ngx_table_elt_t    **h;
+    u_char           *p;
+    u_char           *xff;
+    size_t            xfflen;
+    size_t            i;
 
     addr.sockaddr = r->connection->sockaddr;
     addr.socklen = r->connection->socklen;
@@ -249,10 +262,34 @@ ngx_http_geoip_addr(ngx_http_request_t *r, ngx_http_geoip_conf_t *gcf)
 
     xfwd = &r->headers_in.x_forwarded_for;
 
-    if (xfwd->nelts > 0 && gcf->proxies != NULL) {
+    if (xfwd->nelts > 0) {
+      if (gcf->force_x_forwarded_for) {
+        h = xfwd->elts;
+        i = xfwd->nelts - 1;
+        xfflen = h[i]->value.len;
+        xff = h[i]->value.data;
+
+        for (p = xff + xfflen - 1; p > xff; p--, xfflen--) {
+            if (*p != ' ' && *p != ',') {
+                break;
+            }
+        }
+
+        for ( /* void */ ; p > xff; p--) {
+            if (*p == ' ' || *p == ',') {
+                p++;
+                break;
+            }
+        }
+
+        ngx_parse_addr(r->pool, &addr, p, xfflen - (p - xff));
+      } else if (gcf->proxies != NULL) {
         (void) ngx_http_get_forwarded_addr(r, &addr, xfwd, NULL,
-                                           gcf->proxies, gcf->proxy_recursive);
+                                       gcf->proxies, gcf->proxy_recursive);
+      }
     }
+
+    
 
 #if (NGX_HAVE_INET6)
 
@@ -643,6 +680,7 @@ ngx_http_geoip_create_conf(ngx_conf_t *cf)
     }
 
     conf->proxy_recursive = NGX_CONF_UNSET;
+    conf->force_x_forwarded_for = NGX_CONF_UNSET;
 
     cln = ngx_pool_cleanup_add(cf->pool, 0);
     if (cln == NULL) {
@@ -662,6 +700,7 @@ ngx_http_geoip_init_conf(ngx_conf_t *cf, void *conf)
     ngx_http_geoip_conf_t  *gcf = conf;
 
     ngx_conf_init_value(gcf->proxy_recursive, 0);
+    ngx_conf_init_value(gcf->force_x_forwarded_for, 0);
 
     return NGX_CONF_OK;
 }
